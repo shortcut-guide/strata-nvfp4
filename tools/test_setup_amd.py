@@ -227,6 +227,8 @@ class GpuLists(unittest.TestCase):
             setup.ROOT, setup.cmake_build, setup.ok, setup.shutil = root, fake_build, lambda *a: None, Sh
             setup.source_hash, setup.source_version = (lambda *a: "h"), (lambda: "0.1.31")
             setup.rocm_root = lambda archs: (calls.setdefault("archs", archs) and root, [str(root / "lib")])
+            (root / "llvm" / "bin").mkdir(parents=True, exist_ok=True)
+            (root / "llvm" / "bin" / "clang++").write_text("")   # a real rocm_root result carries its HIP compiler
             try:
                 setup.build_engine_hip({"arch": "gfx1201", "archs": ["gfx1201", "gfx1100", "gfx1201"]}, root)
                 self.assertEqual(calls["archs"], ["gfx1100", "gfx1201"])

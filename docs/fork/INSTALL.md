@@ -75,7 +75,9 @@ page).
   (`strata-windows-x64.zip`, checked against GitHub's SHA-256), on Linux compiled from this source. Upstream's engine
   has no NVFP4 path, so setup never installs it and replaces one an older setup installed.
 - **AMD cards:** the NVFP4 models run on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
-  setup compiles one on Linux; on Windows build it first with `tools\hip\build_windows.bat`, then run
+  setup compiles one on Linux - an RX 6800 XT (gfx1030) included: `./setup.sh --backend hip --family qwen`, with a
+  system ROCm 7 in `/opt/rocm` or a distribution install in `/usr` (the tested path for gfx1030), or the TheRock
+  wheels setup installs by itself; on Windows build it first with `tools\hip\build_windows.bat`, then run
   `START-HERE.bat --backend hip --prebuilt <its dist folder>` ([docs/AMD_HIP.md](../AMD_HIP.md)).
 - **Sampling:** a request that sends none gets the model card's sampling from the server (upstream's, since
   0.2.0-beta-nvfp4.1): with thinking temperature 1.0, top_p 0.95, top_k 20 (Qwen's generation_config.json), without
