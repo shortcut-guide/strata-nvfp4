@@ -4967,22 +4967,89 @@ def rocm_dev_missing(sysroot: Path) -> list:
     """#446: the HIP development files the engine's build needs that a system ROCm lacks (a runtime-only install has
     hipcc and libhipblas but not these, and cmake's enable_language(HIP) then fails on the hip-lang package)."""
     lang = "cmake/hip-lang/hip-lang-config.cmake"     # where CMake's HIP support looks for it
-    need = {"lib/" + lang: [sysroot / d / lang for d in ("lib", "lib64", "lib/x86_64-unknown-linux-gnu")],
+    need = {"lib/" + lang: [sysroot / d / lang for d in ("lib", "lib64", "lib/x86_64-linux-gnu",
+                                                          "lib/x86_64-unknown-linux-gnu")],
             "include/hip/hip_runtime.h": [sysroot / "include" / "hip" / "hip_runtime.h"]}
     return [name for name, paths in need.items() if not any(p.is_file() for p in paths)]
 
 
+ROCM_LIB_SUBDIRS = ("lib", "lib64", "lib/x86_64-linux-gnu")   # /opt/rocm and TheRock: lib; Fedora: lib64; Debian/Ubuntu: the multiarch dir
+
+
+def rocm_lib_dirs(root) -> list:
+    """The library folders of a ROCm install that hold shared libraries, in search order (a folder that
+    only holds CMake packages, as a test or a -dev package can leave, is not a library folder)."""
+    return [d for d in (Path(root) / sub for sub in ROCM_LIB_SUBDIRS) if d.is_dir() and any(d.glob("*.so*"))]
+
+
+def rocm_versioned_dirs(opt=Path("/opt")) -> list:
+    """The versioned ROCm roots under `opt` (/opt/rocm-7.2, /opt/rocm-6.4, ...), newest version first: the
+    version is compared as numbers, not as text, so rocm-10.0 sorts above rocm-7.x (a plain name sort would
+    put "rocm-6" first and pick the older install)."""
+    def vkey(d):
+        return tuple(int(x) for x in re.findall(r"\d+", d.name.partition("-")[2]))
+    try:
+        return sorted(opt.glob("rocm-[0-9]*"), key=vkey, reverse=True)
+    except OSError:
+        return []
+
+
+def rocm_system_candidates() -> list:
+    """System ROCm roots setup looks at, in order: $ROCM_PATH, /opt/rocm, versioned /opt/rocm-* (newest first),
+    /usr/local and /usr (the distribution packages: Fedora and Debian/Ubuntu put hipcc in /usr/bin, the libraries
+    in lib64 or the multiarch folder and the compiler outside llvm/bin, so /opt/rocm alone missed them and a
+    working system ROCm was passed over for the ~10 GB wheels - on gfx1030 those wheels are unvalidated)."""
+    out = []
+    env = os.environ.get("ROCM_PATH")
+    if env:
+        out.append(Path(env))
+    out.append(Path("/opt/rocm"))
+    out += rocm_versioned_dirs()
+    out += [Path("/usr/local"), Path("/usr")]
+    return list(dict.fromkeys(out))
+
+
+def hip_compiler(root):
+    """The HIP C++ compiler of a ROCm install, or None: <root>/llvm/bin/clang++ in the /opt/rocm and TheRock
+    layouts, <root>/lib(64)/llvm/bin/clang++ or <root>/bin/clang++ in the distribution layouts.  Passing the
+    /opt/rocm path for a distribution install made cmake stop with a compiler that does not exist.
+    <root>/bin/clang++ is the last resort on purpose: the distribution packages put their HIP clang there
+    (Debian's is the stock LLVM clang, with the ROCm device libraries beside it, so its --version names no
+    AMD or ROCm to check for); a compiler that cannot build HIP code is refused by CMake's own HIP check,
+    which names it."""
+    root = Path(root)
+    for cand in (root / "llvm" / "bin" / "clang++", root / "lib" / "llvm" / "bin" / "clang++",
+                 root / "lib64" / "llvm" / "bin" / "clang++", root / "bin" / "clang++"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def rocm_bitcode_dir(root) -> Path:
+    """The amdgcn bitcode folder of a ROCm install (the layouts of rocm_lib_dirs), else the /opt/rocm one."""
+    root = Path(root)
+    for cand in (root / "lib" / "llvm" / "amdgcn" / "bitcode", root / "lib64" / "llvm" / "amdgcn" / "bitcode",
+                 root / "amdgcn" / "bitcode"):
+        if cand.is_dir():
+            return cand
+    return root / "amdgcn" / "bitcode"          # none found: the /opt layout's place, as before; CMake names it if it is missing
+
+
 def rocm_root(archs):
     """ROCm for compiling and running the HIP engine for `archs` (one arch or a list: the cards of a layer split):
-    (root, library folders).  A system ROCm 7 with hipcc, hipBLAS and the HIP development files (#446), else AMD's
-    TheRock wheels (rocm_wanted: a version per card family, from the family's index) installed into .venv."""
+    (root, library folders).  A system ROCm 7 with hipcc, hipBLAS and the HIP development files (#446) in any of
+    rocm_system_candidates(), else AMD's TheRock wheels (rocm_wanted: a version per card family, from the family's
+    index) installed into .venv."""
     archs = [archs] if isinstance(archs, str) else list(archs)
-    sysroot = Path(os.environ.get("ROCM_PATH") or "/opt/rocm")
-    if (sysroot / "bin" / "hipcc").exists() and list((sysroot / "lib").glob("libhipblas.so*")):
+    for sysroot in rocm_system_candidates():
+        if not (sysroot / "bin" / "hipcc").exists():
+            continue
+        if not any(list(d.glob("libhipblas.so*")) for d in rocm_lib_dirs(sysroot)):
+            continue
         ver = rocm_version(sysroot)
         missing = rocm_dev_missing(sysroot)
         if (ver is None or ver >= ROCM_SYSTEM_MIN) and not missing:
-            return sysroot, [str(sysroot / "lib")]
+            return sysroot, [str(d) for d in rocm_lib_dirs(sysroot)]
         if ver is not None and ver < ROCM_SYSTEM_MIN:
             warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Strata needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} "
                  "or newer: using AMD's wheels in .venv instead")
@@ -5013,7 +5080,7 @@ def rocm_root(archs):
         stamp.write_text(json.dumps({"version": wheel, "index": index}))
     sdk = Path(sys.executable).parent / "rocm-sdk"
     root = Path(out([str(sdk), "path", "--root"]).strip())
-    if not (root / "llvm" / "bin" / "clang++").exists():
+    if hip_compiler(root) is None:
         fail(f"ROCm was installed but its compiler is missing ({root})",
              f"remove {stamp} and run this again; or install ROCm 7 system-wide")
     # the card family's libraries only (gfx120X-all -> _rocm_sdk_libraries_gfx120X_all): another family's
@@ -5092,13 +5159,19 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
         fail("a C++ compiler and git are needed to compile the AMD engine",
              "Ubuntu/Debian: sudo apt install build-essential git   Fedora: sudo dnf install gcc-c++ git")
     root, dirs = rocm_root(archs)
+    compiler = hip_compiler(root)
+    if compiler is None:
+        fail(f"ROCm is at {root} but its HIP compiler (clang++) was not found under it",
+             "install the ROCm development packages for your distribution (the llvm / hip-devel packages, e.g. "
+             "rocm-llvm and hip-devel), or point ROCM_PATH at a full ROCm 7 install, and run this again")
+    # CMAKE_PREFIX_PATH extras: the parent of each library folder after the first (the first one's parent is
+    # `root` itself, already the first prefix entry); the wheels keep a card family's libraries in such a folder
     libs = [str(Path(d).parent) for d in dirs[1:]]
-    bitcode = next((p for p in (root / "lib" / "llvm" / "amdgcn" / "bitcode", root / "amdgcn" / "bitcode") if p.is_dir()),
-                   root / "amdgcn" / "bitcode")
+    bitcode = rocm_bitcode_dir(root)
     os.environ.update({"HIP_PLATFORM": "amd", "HIP_COMPILER": "clang", "HIP_RUNTIME": "rocclr", "ROCM_PATH": str(root),
                        "HIP_PATH": str(root)})
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(dirs + [os.environ.get("LD_LIBRARY_PATH", "")]).rstrip(os.pathsep)
-    os.environ["PATH"] = os.pathsep.join([str(root / "bin"), str(root / "llvm" / "bin"), os.environ.get("PATH", "")])
+    os.environ["PATH"] = os.pathsep.join([str(root / "bin"), str(compiler.parent), os.environ.get("PATH", "")])
     say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
         if meta.get("backend") == "hip" and (eng / EXE).exists() and has_archs
         else f"  Compiling the Strata engine for your AMD GPU{'s' if len(archs) > 1 else ''} ({', '.join(archs)}; "
@@ -5107,7 +5180,7 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
                  "-DSTRATA_PREFILL_MMQ=ON", "-DSTRATA_Q6K_EXPERTS=ON", "-DSTRATA_MMQ_KQUANTS=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  "-DSTRATA_MMQ=OFF",   # without llama.cpp's MMQ, also in a build folder configured before (its cache says ON)
-                 f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
+                 f"-DCMAKE_HIP_COMPILER={compiler}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
                  f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
                  *ggml_defs(llama), *isa_floor_defs(floor, ROOT / "build-hip", meta)], None, "")
@@ -5174,14 +5247,19 @@ def build_vision_hip(eng: Path, stamp: Path, meta: dict, llama, vsrc, archs: lis
     if vision != "gpu":
         return eng
     root, dirs = rocm_root(archs)
+    compiler = hip_compiler(root)
+    if compiler is None:                               # the CPU reader is already built: pictures still work
+        warn(f"ROCm is at {root} but its HIP compiler (clang++) was not found under it: pictures are read on the CPU")
+        return eng
+    # CMAKE_PREFIX_PATH extras: the parent of each library folder after the first (the first one's parent is
+    # `root` itself, already the first prefix entry); the wheels keep a card family's libraries in such a folder
     libs = [str(Path(d).parent) for d in dirs[1:]]
-    bitcode = next((p for p in (root / "lib" / "llvm" / "amdgcn" / "bitcode", root / "amdgcn" / "bitcode") if p.is_dir()),
-                   root / "amdgcn" / "bitcode")
+    bitcode = rocm_bitcode_dir(root)
     say("  Compiling the picture reader for your AMD GPU (a few minutes, once) ...")
     try:
         cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision-hip", "strata-vision",
                     [f"-DLLAMA_DIR={vision_llama(llama)}", "-DSTRATA_VISION_HIP=ON", "-DSTRATA_VISION_HIP_ARCHS=" + ";".join(archs),
-                     "-DSTRATA_PORTABLE=OFF", f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}",
+                     "-DSTRATA_PORTABLE=OFF", f"-DCMAKE_HIP_COMPILER={compiler}",
                      f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}", "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
                      f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}"], None, "")
         shutil.copy2(ROOT / "build-vision-hip" / "bin" / HVEXE, eng / HVEXE)

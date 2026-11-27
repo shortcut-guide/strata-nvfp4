@@ -101,7 +101,7 @@ prompt-speed run with `on` and `off` from an RX 7000 or Strix Halo card.
 | Step | What setup does |
 | --- | --- |
 | Detection | Finds the card through the kernel's KFD topology. Integrated Radeon GPUs are listed as not supported (Strix Halo has its own page). |
-| ROCm | Uses a system ROCm 7 in `/opt/rocm` (or `$ROCM_PATH`) with hipcc and hipBLAS when present. Otherwise, or when it is older than 7.0, installs ROCm into `.venv` from AMD's TheRock wheels (about 10 GB, no sudo). |
+| ROCm | Uses a system ROCm 7 with hipcc and hipBLAS when present: `$ROCM_PATH`, `/opt/rocm`, a versioned `/opt/rocm-*`, or a distribution install in `/usr/local` or `/usr` (Fedora's `lib64`, Debian/Ubuntu's multiarch folder; the HIP compiler is looked for in each layout, not only in `llvm/bin`). Otherwise, or when it is older than 7.0, installs ROCm into `.venv` from AMD's TheRock wheels (about 10 GB, no sudo). |
 | Engine | Compiles it for the card's architecture (10-20 minutes, once; again when you pick another architecture). Needs a C++ compiler and git (`sudo apt install build-essential git`). |
 | Tuning table | Uses `tools/hip/<arch>-hipblaslt-<version>.txt` only when it matches both the architecture and the installed hipBLASLt version. Otherwise it says so and uses plain hipBLAS. On gfx103x the same role falls to a rocBLAS table. |
 | Pictures | On by default. CPU reader under 24 GB of VRAM, GPU reader from 24 GB; `--vision gpu` / `--vision cpu` switch it. If the GPU reader cannot start, the CPU reader is used. |
@@ -494,6 +494,23 @@ The shipped gfx1200 table (`gfx1200-hipblaslt-100202.txt`) against plain hipBLAS
 | 2,374 tokens | 597-599 tok/s | 396-398 tok/s | 1.50x |
 | 65,045 tokens | 754-757 tok/s | 380 tok/s | 1.99x |
 | 130,091 tokens | 719 tok/s | 363-370 tok/s | 1.98x |
+
+### RX 6800 XT on Linux, step by step
+
+The RX 6800 / 6800 XT / 6900 XT (gfx1030, 16 GB) run the GGUF models through the HIP backend. The NVFP4
+models of this fork do not run on AMD cards (their path is CUDA), so name a GGUF family:
+
+```sh
+sudo usermod -aG render,video $USER   # then log out and in again: /dev/kfd and the render nodes need it
+./setup.sh --backend hip --family qwen --check   # says what fits this PC, changes nothing
+./setup.sh --backend hip --family qwen           # or: --family unsloth
+```
+
+A system ROCm 7 is the tested path for this card (the `gfx103X-all` wheels below are unvalidated): AMD's
+install in `/opt/rocm`, or a distribution install in `/usr` - setup finds both, with their own library and
+compiler folders. With no usable system ROCm it installs the wheels into `.venv` by itself. The engine is
+compiled for gfx1030 once (10-20 minutes, a warning that gfx1030 is unvalidated is expected), and the card
+runs the plain kernels of [RDNA2](#rdna2-gfx1030) below.
 
 ## RDNA2 (gfx1030)
 
