@@ -69,6 +69,15 @@ class SystemRocmLayouts(unittest.TestCase):
         self.assertEqual(cands[-2:], [Path("/usr/local"), Path("/usr")])
         self.assertEqual(len(cands), len(set(cands)))          # no root is tried twice
 
+    def test_versioned_dirs_sort_by_version_numbers_not_names(self):
+        with tempfile.TemporaryDirectory() as d:
+            opt = Path(d)
+            for name in ("rocm-6.4", "rocm-10.0", "rocm-7.2", "rocm-7.10"):
+                (opt / name).mkdir()
+            (opt / "rocm-docs").mkdir()                # not a versioned install: not a candidate
+            self.assertEqual([x.name for x in setup.rocm_versioned_dirs(opt)],
+                             ["rocm-10.0", "rocm-7.10", "rocm-7.2", "rocm-6.4"])
+
     def test_no_compiler_is_none_not_the_opt_path(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)

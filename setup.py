@@ -4982,6 +4982,18 @@ def rocm_lib_dirs(root) -> list:
     return [d for d in (Path(root) / sub for sub in ROCM_LIB_SUBDIRS) if d.is_dir() and any(d.glob("*.so*"))]
 
 
+def rocm_versioned_dirs(opt=Path("/opt")) -> list:
+    """The versioned ROCm roots under `opt` (/opt/rocm-7.2, /opt/rocm-6.4, ...), newest version first: the
+    version is compared as numbers, not as text, so rocm-10.0 sorts above rocm-7.x (a plain name sort would
+    put "rocm-6" first and pick the older install)."""
+    def vkey(d):
+        return tuple(int(x) for x in re.findall(r"\d+", d.name.partition("-")[2]))
+    try:
+        return sorted(opt.glob("rocm-[0-9]*"), key=vkey, reverse=True)
+    except OSError:
+        return []
+
+
 def rocm_system_candidates() -> list:
     """System ROCm roots setup looks at, in order: $ROCM_PATH, /opt/rocm, versioned /opt/rocm-* (newest first),
     /usr/local and /usr (the distribution packages: Fedora and Debian/Ubuntu put hipcc in /usr/bin, the libraries
@@ -4992,10 +5004,7 @@ def rocm_system_candidates() -> list:
     if env:
         out.append(Path(env))
     out.append(Path("/opt/rocm"))
-    try:
-        out += sorted(Path("/opt").glob("rocm-[0-9]*"), reverse=True)
-    except OSError:
-        pass
+    out += rocm_versioned_dirs()
     out += [Path("/usr/local"), Path("/usr")]
     return list(dict.fromkeys(out))
 
@@ -5003,7 +5012,11 @@ def rocm_system_candidates() -> list:
 def hip_compiler(root):
     """The HIP C++ compiler of a ROCm install, or None: <root>/llvm/bin/clang++ in the /opt/rocm and TheRock
     layouts, <root>/lib(64)/llvm/bin/clang++ or <root>/bin/clang++ in the distribution layouts.  Passing the
-    /opt/rocm path for a distribution install made cmake stop with a compiler that does not exist."""
+    /opt/rocm path for a distribution install made cmake stop with a compiler that does not exist.
+    <root>/bin/clang++ is the last resort on purpose: the distribution packages put their HIP clang there
+    (Debian's is the stock LLVM clang, with the ROCm device libraries beside it, so its --version names no
+    AMD or ROCm to check for); a compiler that cannot build HIP code is refused by CMake's own HIP check,
+    which names it."""
     root = Path(root)
     for cand in (root / "llvm" / "bin" / "clang++", root / "lib" / "llvm" / "bin" / "clang++",
                  root / "lib64" / "llvm" / "bin" / "clang++", root / "bin" / "clang++"):
@@ -5019,7 +5032,7 @@ def rocm_bitcode_dir(root) -> Path:
                  root / "amdgcn" / "bitcode"):
         if cand.is_dir():
             return cand
-    return root / "amdgcn" / "bitcode"
+    return root / "amdgcn" / "bitcode"          # none found: the /opt layout's place, as before; CMake names it if it is missing
 
 
 def rocm_root(archs):
@@ -5151,6 +5164,8 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
         fail(f"ROCm is at {root} but its HIP compiler (clang++) was not found under it",
              "install the ROCm development packages for your distribution (the llvm / hip-devel packages, e.g. "
              "rocm-llvm and hip-devel), or point ROCM_PATH at a full ROCm 7 install, and run this again")
+    # CMAKE_PREFIX_PATH extras: the parent of each library folder after the first (the first one's parent is
+    # `root` itself, already the first prefix entry); the wheels keep a card family's libraries in such a folder
     libs = [str(Path(d).parent) for d in dirs[1:]]
     bitcode = rocm_bitcode_dir(root)
     os.environ.update({"HIP_PLATFORM": "amd", "HIP_COMPILER": "clang", "HIP_RUNTIME": "rocclr", "ROCM_PATH": str(root),
@@ -5236,6 +5251,8 @@ def build_vision_hip(eng: Path, stamp: Path, meta: dict, llama, vsrc, archs: lis
     if compiler is None:                               # the CPU reader is already built: pictures still work
         warn(f"ROCm is at {root} but its HIP compiler (clang++) was not found under it: pictures are read on the CPU")
         return eng
+    # CMAKE_PREFIX_PATH extras: the parent of each library folder after the first (the first one's parent is
+    # `root` itself, already the first prefix entry); the wheels keep a card family's libraries in such a folder
     libs = [str(Path(d).parent) for d in dirs[1:]]
     bitcode = rocm_bitcode_dir(root)
     say("  Compiling the picture reader for your AMD GPU (a few minutes, once) ...")
